@@ -1,304 +1,305 @@
-/**
- * TodoService.ts
- * 
- * This service implements the core business logic for managing todos.
- * It acts as an intermediary between the data model and the database,
- * handling all CRUD operations and search functionality.
- * 
- * WHY A SERVICE LAYER?
- * - Separates business logic from database operations
- * - Provides a clean API for the application to work with
- * - Makes it easier to change the database implementation later
- * - Encapsulates complex operations into simple method calls
- */
-import { Todo, createTodo, CreateTodoSchema, UpdateTodoSchema } from '../models/Todo.js';
+import { Todo, Recurrence, TodoCompletion, createTodo, CreateTodoSchema, UpdateTodoSchema } from '../models/Todo.js';
 import { z } from 'zod';
 import { databaseService } from './DatabaseService.js';
+import { v4 as uuidv4 } from 'uuid';
 
-/**
- * TodoService Class
- * 
- * This service follows the repository pattern to provide a clean
- * interface for working with todos. It encapsulates all database
- * operations and business logic in one place.
- */
+function matchesDate(recurrence: Recurrence, targetDate: Date, startDate: Date): boolean {
+  const diffTime = targetDate.getTime() - startDate.getTime();
+  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+
+  if (diffDays < 0) return false;
+
+  if (recurrence.endDate) {
+    const endDate = new Date(recurrence.endDate + 'T00:00:00');
+    if (targetDate > endDate) return false;
+  }
+
+  switch (recurrence.frequency) {
+    case 'daily': {
+      return diffDays % recurrence.interval === 0;
+    }
+    case 'weekly': {
+      const dayOfWeek = targetDate.getDay();
+      if (recurrence.daysOfWeek && !recurrence.daysOfWeek.includes(dayOfWeek)) return false;
+      const startDay = startDate.getDay();
+      const adjustedDiff = diffDays + startDay;
+      const weeksPassed = Math.floor(adjustedDiff / 7);
+      return weeksPassed % recurrence.interval === 0;
+    }
+    case 'monthly': {
+      const targetDay = recurrence.dayOfMonth ?? startDate.getDate();
+      if (targetDate.getDate() !== targetDay) return false;
+      const startMonth = startDate.getMonth() + startDate.getFullYear() * 12;
+      const targetMonth = targetDate.getMonth() + targetDate.getFullYear() * 12;
+      const monthsDiff = targetMonth - startMonth;
+      return monthsDiff >= 0 && monthsDiff % recurrence.interval === 0;
+    }
+    case 'yearly': {
+      if (targetDate.getMonth() !== startDate.getMonth() || targetDate.getDate() !== startDate.getDate()) return false;
+      const yearsDiff = targetDate.getFullYear() - startDate.getFullYear();
+      return yearsDiff >= 0 && yearsDiff % recurrence.interval === 0;
+    }
+    default:
+      return false;
+  }
+}
+
+function generateOccurrenceDates(recurrence: Recurrence, upToDate: string): string[] {
+  const startDate = new Date(recurrence.startDate + 'T00:00:00');
+  const end = new Date(upToDate + 'T00:00:00');
+  const dates: string[] = [];
+  const current = new Date(startDate);
+  const maxIterations = 365 * 10;
+  let iterations = 0;
+
+  while (current <= end && iterations < maxIterations) {
+    iterations++;
+    if (matchesDate(recurrence, current, startDate)) {
+      dates.push(current.toISOString().slice(0, 10));
+    }
+    current.setDate(current.getDate() + 1);
+  }
+
+  return dates;
+}
+
 class TodoService {
-  /**
-   * Create a new todo
-   * 
-   * This method:
-   * 1. Uses the factory function to create a new Todo object
-   * 2. Persists it to the database
-   * 3. Returns the created Todo
-   * 
-   * @param data Validated input data (title and description)
-   * @returns The newly created Todo
-   */
   createTodo(data: z.infer<typeof CreateTodoSchema>): Todo {
-    // Use the factory function to create a Todo with proper defaults
-    const todo = createTodo(data);
-    
-    // Get the database instance
+    const validated = CreateTodoSchema.parse(data);
+    const todo = createTodo(validated);
     const db = databaseService.getDb();
-    
-    // Prepare the SQL statement for inserting a new todo
     const stmt = db.prepare(`
-      INSERT INTO todos (id, title, description, completedAt, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO todos (id, title, description, completedAt, scheduledDate, dueDate, recurrence, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    
-    // Execute the statement with the todo's data
     stmt.run(
       todo.id,
       todo.title,
       todo.description,
       todo.completedAt,
+      todo.scheduledDate,
+      todo.dueDate,
+      todo.recurrence ? JSON.stringify(todo.recurrence) : null,
       todo.createdAt,
       todo.updatedAt
     );
-    
-    // Return the created todo
     return todo;
   }
 
-  /**
-   * Get a todo by ID
-   * 
-   * This method:
-   * 1. Queries the database for a todo with the given ID
-   * 2. Converts the database row to a Todo object if found
-   * 
-   * @param id The UUID of the todo to retrieve
-   * @returns The Todo if found, undefined otherwise
-   */
   getTodo(id: string): Todo | undefined {
     const db = databaseService.getDb();
-    
-    // Use parameterized query to prevent SQL injection
     const stmt = db.prepare('SELECT * FROM todos WHERE id = ?');
     const row = stmt.get(id) as any;
-    
-    // Return undefined if no todo was found
     if (!row) return undefined;
-    
-    // Convert the database row to a Todo object
     return this.rowToTodo(row);
   }
 
-  /**
-   * Get all todos
-   * 
-   * This method returns all todos in the database without filtering.
-   * 
-   * @returns Array of all Todos
-   */
   getAllTodos(): Todo[] {
     const db = databaseService.getDb();
     const stmt = db.prepare('SELECT * FROM todos');
     const rows = stmt.all() as any[];
-    
-    // Convert each database row to a Todo object
     return rows.map(row => this.rowToTodo(row));
   }
 
-  /**
-   * Get all active (non-completed) todos
-   * 
-   * This method returns only todos that haven't been marked as completed.
-   * A todo is considered active when its completedAt field is NULL.
-   * 
-   * @returns Array of active Todos
-   */
   getActiveTodos(): Todo[] {
     const db = databaseService.getDb();
     const stmt = db.prepare('SELECT * FROM todos WHERE completedAt IS NULL');
     const rows = stmt.all() as any[];
-    
-    // Convert each database row to a Todo object
     return rows.map(row => this.rowToTodo(row));
   }
 
-  /**
-   * Update a todo
-   * 
-   * This method:
-   * 1. Checks if the todo exists
-   * 2. Updates the specified fields
-   * 3. Returns the updated todo
-   * 
-   * @param data The update data (id required, title/description optional)
-   * @returns The updated Todo if found, undefined otherwise
-   */
   updateTodo(data: z.infer<typeof UpdateTodoSchema>): Todo | undefined {
-    // First check if the todo exists
     const todo = this.getTodo(data.id);
     if (!todo) return undefined;
 
-    // Create a timestamp for the update
     const updatedAt = new Date().toISOString();
-    
     const db = databaseService.getDb();
     const stmt = db.prepare(`
       UPDATE todos
-      SET title = ?, description = ?, updatedAt = ?
+      SET title = ?, description = ?, scheduledDate = ?, dueDate = ?, updatedAt = ?
       WHERE id = ?
     `);
-    
-    // Update with new values or keep existing ones if not provided
     stmt.run(
-      data.title || todo.title,
-      data.description || todo.description,
+      data.title !== undefined ? data.title : todo.title,
+      data.description !== undefined ? data.description : todo.description,
+      data.scheduledDate !== undefined ? data.scheduledDate : todo.scheduledDate,
+      data.dueDate !== undefined ? data.dueDate : todo.dueDate,
       updatedAt,
       todo.id
     );
-    
-    // Return the updated todo
     return this.getTodo(todo.id);
   }
 
-  /**
-   * Mark a todo as completed
-   * 
-   * This method:
-   * 1. Checks if the todo exists
-   * 2. Sets the completedAt timestamp to the current time
-   * 3. Returns the updated todo
-   * 
-   * @param id The UUID of the todo to complete
-   * @returns The updated Todo if found, undefined otherwise
-   */
-  completeTodo(id: string): Todo | undefined {
-    // First check if the todo exists
+  completeTodo(id: string, date?: string): { todo: Todo; wasRecurring: boolean } {
     const todo = this.getTodo(id);
-    if (!todo) return undefined;
+    if (!todo) throw new Error(`Todo with ID ${id} not found`);
 
-    // Create a timestamp for the completion and update
+    if (todo.recurrence) {
+      if (!date) throw new Error("Date is required for completing recurring tasks");
+      this.completeRecurringTask(id, date);
+      const updated = this.getTodo(id);
+      if (!updated) throw new Error(`Todo with ID ${id} not found after completion`);
+      return { todo: updated, wasRecurring: true };
+    }
+
     const now = new Date().toISOString();
-    
     const db = databaseService.getDb();
     const stmt = db.prepare(`
-      UPDATE todos
-      SET completedAt = ?, updatedAt = ?
-      WHERE id = ?
+      UPDATE todos SET completedAt = ?, updatedAt = ? WHERE id = ?
     `);
-    
-    // Set the completedAt timestamp
     stmt.run(now, now, id);
-    
-    // Return the updated todo
-    return this.getTodo(id);
+    const updated = this.getTodo(id);
+    if (!updated) throw new Error(`Todo with ID ${id} not found after completion`);
+    return { todo: updated, wasRecurring: false };
   }
 
-  /**
-   * Delete a todo
-   * 
-   * This method removes a todo from the database permanently.
-   * 
-   * @param id The UUID of the todo to delete
-   * @returns true if deleted, false if not found or not deleted
-   */
+  completeRecurringTask(todoId: string, date: string): void {
+    const existing = this.getCompletionForDate(todoId, date);
+    if (existing) return;
+
+    const db = databaseService.getDb();
+    const now = new Date().toISOString();
+    db.prepare(
+      'INSERT INTO todo_completions (id, todoId, completedDate, completedAt) VALUES (?, ?, ?, ?)'
+    ).run(uuidv4(), todoId, date, now);
+  }
+
+  getCompletionForDate(todoId: string, date: string): TodoCompletion | undefined {
+    const db = databaseService.getDb();
+    const row = db.prepare(
+      'SELECT * FROM todo_completions WHERE todoId = ? AND completedDate = ?'
+    ).get(todoId, date) as any;
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      todoId: row.todoId,
+      completedDate: row.completedDate,
+      completedAt: row.completedAt,
+    };
+  }
+
+  completeAllRecurrences(todoId: string): { backfilledCount: number } {
+    const todo = this.getTodo(todoId);
+    if (!todo) throw new Error(`Todo with ID ${todoId} not found`);
+    if (!todo.recurrence) throw new Error('Task is not recurring');
+
+    const today = new Date().toISOString().slice(0, 10);
+    const occurrenceDates = generateOccurrenceDates(todo.recurrence, today);
+
+    const db = databaseService.getDb();
+    const now = new Date().toISOString();
+    let backfilledCount = 0;
+
+    const insertStmt = db.prepare(
+      'INSERT OR IGNORE INTO todo_completions (id, todoId, completedDate, completedAt) VALUES (?, ?, ?, ?)'
+    );
+
+    const transaction = db.transaction(() => {
+      for (const date of occurrenceDates) {
+        insertStmt.run(uuidv4(), todoId, date, now);
+        backfilledCount++;
+      }
+
+      const updatedRecurrence = { ...todo.recurrence, endDate: today };
+      db.prepare(
+        'UPDATE todos SET recurrence = ?, updatedAt = ? WHERE id = ?'
+      ).run(JSON.stringify(updatedRecurrence), now, todoId);
+    });
+
+    transaction();
+    return { backfilledCount };
+  }
+
   deleteTodo(id: string): boolean {
     const db = databaseService.getDb();
     const stmt = db.prepare('DELETE FROM todos WHERE id = ?');
     const result = stmt.run(id);
-    
-    // Check if any rows were affected
     return result.changes > 0;
   }
 
-  /**
-   * Search todos by title
-   * 
-   * This method performs a case-insensitive partial match search
-   * on todo titles.
-   * 
-   * @param title The search term to look for in titles
-   * @returns Array of matching Todos
-   */
   searchByTitle(title: string): Todo[] {
-    // Add wildcards to the search term for partial matching
     const searchTerm = `%${title}%`;
-    
     const db = databaseService.getDb();
-    
-    // COLLATE NOCASE makes the search case-insensitive
     const stmt = db.prepare('SELECT * FROM todos WHERE title LIKE ? COLLATE NOCASE');
     const rows = stmt.all(searchTerm) as any[];
-    
     return rows.map(row => this.rowToTodo(row));
   }
 
-  /**
-   * Search todos by date
-   * 
-   * This method finds todos created on a specific date.
-   * It matches the start of the ISO string with the given date.
-   * 
-   * @param dateStr The date to search for in YYYY-MM-DD format
-   * @returns Array of matching Todos
-   */
   searchByDate(dateStr: string): Todo[] {
-    // Add wildcard to match the time portion of ISO string
-    const datePattern = `${dateStr}%`;
-    
     const db = databaseService.getDb();
-    const stmt = db.prepare('SELECT * FROM todos WHERE createdAt LIKE ?');
-    const rows = stmt.all(datePattern) as any[];
-    
+    const stmt = db.prepare('SELECT * FROM todos WHERE scheduledDate = ?');
+    const rows = stmt.all(dateStr) as any[];
     return rows.map(row => this.rowToTodo(row));
   }
 
-  /**
-   * Generate a summary of active todos
-   * 
-   * This method creates a markdown-formatted summary of all active todos.
-   * 
-   * WHY RETURN FORMATTED STRING?
-   * - Provides ready-to-display content for the MCP client
-   * - Encapsulates formatting logic in the service
-   * - Makes it easy for LLMs to present a readable summary
-   * 
-   * @returns Markdown-formatted summary string
-   */
+  getTasksForDate(date: string): { today: Todo[]; overdue: Todo[] } {
+    const db = databaseService.getDb();
+
+    const todayRows = db.prepare(
+      'SELECT * FROM todos WHERE scheduledDate = ? AND completedAt IS NULL'
+    ).all(date) as any[];
+
+    const overdueRows = db.prepare(
+      'SELECT * FROM todos WHERE completedAt IS NULL AND (scheduledDate IS NOT NULL AND scheduledDate < ? OR dueDate IS NOT NULL AND dueDate < ?)'
+    ).all(date, date) as any[];
+
+    const recurringRows = db.prepare(
+      'SELECT * FROM todos WHERE recurrence IS NOT NULL AND completedAt IS NULL'
+    ).all() as any[];
+
+    const recurringToday: Todo[] = [];
+    const targetDate = new Date(date + 'T00:00:00');
+
+    for (const row of recurringRows) {
+      const todo = this.rowToTodo(row);
+      if (!todo.recurrence) continue;
+
+      const startDate = new Date(todo.recurrence.startDate + 'T00:00:00');
+      if (!matchesDate(todo.recurrence, targetDate, startDate)) continue;
+
+      const completion = this.getCompletionForDate(todo.id, date);
+      if (!completion) {
+        recurringToday.push(todo);
+      }
+    }
+
+    const today = [...todayRows.map(r => this.rowToTodo(r)), ...recurringToday];
+    const overdue = overdueRows.map(r => this.rowToTodo(r));
+
+    return { today, overdue };
+  }
+
   summarizeActiveTodos(): string {
     const activeTodos = this.getActiveTodos();
-    
-    // Handle the case when there are no active todos
     if (activeTodos.length === 0) {
       return "No active todos found.";
     }
-    
-    // Create a bulleted list of todo titles
     const summary = activeTodos.map(todo => `- ${todo.title}`).join('\n');
     return `# Active Todos Summary\n\nThere are ${activeTodos.length} active todos:\n\n${summary}`;
   }
-  
-  /**
-   * Helper to convert a database row to a Todo object
-   * 
-   * This private method handles the conversion between the database
-   * representation and the application model.
-   * 
-   * WHY SEPARATE THIS LOGIC?
-   * - Avoids repeating the conversion code in multiple methods
-   * - Creates a single place to update if the model changes
-   * - Isolates database-specific knowledge from the rest of the code
-   * 
-   * @param row The database row data
-   * @returns A properly formatted Todo object
-   */
+
   private rowToTodo(row: any): Todo {
+    let recurrence: Recurrence | null = null;
+    if (row.recurrence) {
+      try {
+        recurrence = typeof row.recurrence === 'string' ? JSON.parse(row.recurrence) : row.recurrence;
+      } catch {
+        recurrence = null;
+      }
+    }
     return {
       id: row.id,
       title: row.title,
       description: row.description,
       completedAt: row.completedAt,
-      completed: row.completedAt !== null, // Computed from completedAt
+      completed: row.completedAt !== null,
+      scheduledDate: row.scheduledDate ?? null,
+      dueDate: row.dueDate ?? null,
+      recurrence,
       createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      updatedAt: row.updatedAt,
     };
   }
 }
 
-// Create a singleton instance for use throughout the application
-export const todoService = new TodoService(); 
+export const todoService = new TodoService();

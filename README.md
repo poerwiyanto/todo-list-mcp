@@ -10,27 +10,31 @@ A Model Context Protocol (MCP) server that provides a comprehensive API for mana
 
 ## Features
 
-- **Create todos**: Add new tasks with title and markdown description
-- **Update todos**: Modify existing tasks
-- **Complete todos**: Mark tasks as done
-- **Delete todos**: Remove tasks from the list
-- **Search todos**: Find tasks by title or creation date
+- **Create todos**: Add new tasks with title, markdown description, optional scheduling, deadlines, or recurrence
+- **Update todos**: Modify existing tasks (title, description, scheduled date, due date)
+- **Complete todos**: Mark tasks as done (recurring tasks support per-date completion)
+- **Delete todos**: Remove tasks from the list (cascades completion records for recurring tasks)
+- **Search todos**: Find tasks by title or scheduled date
 - **Summarize todos**: Get a quick overview of active tasks
+- **Daily planning**: Get tasks for a specific date with overdue section
+- **Recurring tasks**: Daily, weekly, monthly, or yearly recurrence with intervals
 
 ## Tools
 
 This MCP server exposes the following tools:
 
-1. `create-todo`: Create a new todo item
+1. `create-todo`: Create a new todo item (supports scheduling, deadlines, and recurrence)
 2. `list-todos`: List all todos
 3. `get-todo`: Get a specific todo by ID
-4. `update-todo`: Update a todo's title or description
-5. `complete-todo`: Mark a todo as completed
+4. `update-todo`: Update a todo's title, description, scheduled date, or due date
+5. `complete-todo`: Mark a todo as completed (for recurring tasks, provide a date)
 6. `delete-todo`: Delete a todo
 7. `search-todos-by-title`: Search todos by title (case-insensitive partial match)
-8. `search-todos-by-date`: Search todos by creation date (format: YYYY-MM-DD)
-9. `list-active-todos`: List all non-completed todos
-10. `summarize-active-todos`: Generate a summary of all active (non-completed) todos
+8. `search-todos-by-date`: Search todos by scheduled date (format: YYYY-MM-DD)
+9. `get-tasks-for-date`: Get tasks for a specific date (scheduled, recurring, and overdue)
+10. `complete-all-recurrences`: Retire a recurring task by completing all occurrences
+11. `list-active-todos`: List all non-completed todos
+12. `summarize-active-todos`: Generate a summary of all active (non-completed) todos
 
 ## Installation
 

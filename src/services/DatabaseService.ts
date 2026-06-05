@@ -27,46 +27,83 @@ import { config, ensureDbFolder } from '../config.js';
 class DatabaseService {
   private db: Database.Database;
 
-  constructor() {
-    // Ensure the database folder exists before trying to create the database
-    ensureDbFolder();
-    
-    // Initialize the database with the configured path
-    this.db = new Database(config.db.path);
-    
-    /**
-     * Set pragmas for performance and safety:
-     * - WAL (Write-Ahead Logging): Improves concurrent access performance
-     * - foreign_keys: Ensures referential integrity (useful for future expansion)
-     */
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    
-    // Initialize the database schema when service is created
-    this.initSchema();
-  }
-
-  /**
-   * Initialize the database schema
-   * 
-   * This creates the todos table if it doesn't already exist.
-   * The schema design incorporates:
-   * - TEXT primary key for UUID compatibility
-   * - NULL completedAt to represent incomplete todos
-   * - Timestamp fields for tracking creation and updates
-   */
-  private initSchema(): void {
-    // Create todos table if it doesn't exist
-    this.db.exec(`
+  private migrations: Record<number, string[]> = {
+    1: [`
       CREATE TABLE IF NOT EXISTS todos (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         description TEXT NOT NULL,
-        completedAt TEXT NULL, -- ISO timestamp, NULL if not completed
+        completedAt TEXT NULL,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL
       )
+    `],
+    2: [`
+      ALTER TABLE todos ADD COLUMN scheduledDate TEXT;
+    `, `
+      ALTER TABLE todos ADD COLUMN dueDate TEXT;
+    `, `
+      ALTER TABLE todos ADD COLUMN recurrence TEXT;
+    `],
+    3: [`
+      CREATE TABLE IF NOT EXISTS todo_completions (
+        id TEXT PRIMARY KEY,
+        todoId TEXT NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+        completedDate TEXT NOT NULL,
+        completedAt TEXT NOT NULL,
+        UNIQUE(todoId, completedDate)
+      )
+    `],
+  };
+
+  constructor() {
+    ensureDbFolder();
+    this.db = new Database(config.db.path);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+    this.runMigrations();
+  }
+
+  private getCurrentVersion(): number {
+    const row = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
+    ).get() as any;
+
+    if (!row) return 0;
+
+    const versionRow = this.db.prepare(
+      'SELECT MAX(version) as version FROM schema_version'
+    ).get() as any;
+
+    return versionRow?.version ?? 0;
+  }
+
+  private runMigrations(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER NOT NULL,
+        appliedAt TEXT NOT NULL
+      )
     `);
+
+    const currentVersion = this.getCurrentVersion();
+    const maxVersion = Math.max(...Object.keys(this.migrations).map(Number));
+    const now = new Date().toISOString();
+
+    for (let v = currentVersion + 1; v <= maxVersion; v++) {
+      const statements = this.migrations[v];
+      if (!statements) continue;
+
+      const transaction = this.db.transaction(() => {
+        for (const sql of statements) {
+          this.db.exec(sql);
+        }
+        this.db.prepare(
+          'INSERT INTO schema_version (version, appliedAt) VALUES (?, ?)'
+        ).run(v, now);
+      });
+      transaction();
+    }
   }
 
   /**
